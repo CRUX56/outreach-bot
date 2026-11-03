@@ -67,14 +67,14 @@ export async function hasMx(email: string): Promise<boolean> {
 
 // Audits new leads, then finds and MX-checks emails for the weak ones
 export async function processNewLeads(limit = 25) {
-  const leads = await q("SELECT id, website FROM leads WHERE status='new' LIMIT $1", [limit]);
+  const leads = await q("SELECT id, website, email FROM leads WHERE status='new' LIMIT $1", [limit]);
   for (const l of leads) {
     const findings = await auditWebsite(l.website);
     const weak = isWeak(findings);
     let email: string | null = null;
     let verified = false;
     if (weak) {
-      email = await findEmail(l.website);
+      email = l.email ?? (await findEmail(l.website));
       verified = email ? await hasMx(email) : false;
     }
     const sup = email ? await q("SELECT 1 FROM suppression WHERE email=$1", [email]) : [];

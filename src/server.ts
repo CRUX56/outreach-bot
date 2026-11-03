@@ -5,6 +5,7 @@ import { q } from "./db.js";
 import { encrypt, unsubToken } from "./crypto.js";
 import { searchPlaces, processNewLeads } from "./leads.js";
 import { draftQualified } from "./worker.js";
+import { searchOsm, importCsv } from "./osm.js";
 import { checkDns, sendTest, verifyProfile, type Profile } from "./mailer.js";
 
 const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -29,7 +30,7 @@ function auth(req: Request, res: Response, next: NextFunction) {
 
 export function buildApp() {
   const app = express();
-  app.use(express.urlencoded({ extended: false }));
+  app.use(express.urlencoded({ extended: false, limit: "5mb" }));
 
   // Public: one-click unsubscribe (no auth)
   const unsub = async (req: Request, res: Response) => {
@@ -53,15 +54,30 @@ export function buildApp() {
     res.send(page("Dashboard", `
       <div class=card><h3>Find leads</h3><form method=post action=/search>
       <label>Category (e.g. plumber)</label><input name=category required>
-      <label>City (e.g. Austin, TX)</label><input name=city required><p><button>Search &amp; audit</button></p></form></div>
+      <label>City (e.g. Austin, TX)</label><input name=city required>
+      <label>Source</label><select name=source><option value=osm>OpenStreetMap (free)</option><option value=google>Google Places (needs API key)</option></select>
+      <p><button>Search &amp; audit</button></p></form></div>
+      <div class=card><h3>Import CSV</h3><form method=post action=/import>
+      <label>Paste CSV with header row: name, website, email, phone, category, city</label><textarea name=csv rows=5 required></textarea>
+      <p><button>Import &amp; audit</button></p></form></div>
       <h3>Leads</h3><table>${stats.map(row).join("")}</table><h3>Drafts</h3><table>${dr.map(row).join("")}</table>`));
   });
 
   app.post("/search", async (req, res) => {
     try {
-      await searchPlaces(String(req.body.category), String(req.body.city));
+      const search = req.body.source === "google" ? searchPlaces : searchOsm;
+      await search(String(req.body.category), String(req.body.city));
       await processNewLeads(40);
       await draftQualified(40);
+      res.redirect("/drafts");
+    } catch (e: any) { res.status(500).send(page("Error", `<pre>${esc(e.message)}</pre>`)); }
+  });
+
+  app.post("/import", async (req, res) => {
+    try {
+      await importCsv(String(req.body.csv));
+      await processNewLeads(100);
+      await draftQualified(100);
       res.redirect("/drafts");
     } catch (e: any) { res.status(500).send(page("Error", `<pre>${esc(e.message)}</pre>`)); }
   });

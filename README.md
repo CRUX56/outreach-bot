@@ -1,9 +1,9 @@
 # Outreach Bot
 
-Self-hosted cold-email bot: finds local businesses with weak/no websites (Google Places), audits their sites, drafts personalized emails with a local Ollama model, and sends only after you approve each draft.
+Self-hosted cold-email bot: finds local businesses with weak/no websites (OpenStreetMap (default, free, no key) or Google Places (optional)), audits their sites, drafts personalized emails with a local Ollama model, and sends only after you approve each draft.
 
 ## Setup
-1. `copy .env.example .env` and set `APP_SECRET`, `ADMIN_PASSWORD`, `GOOGLE_PLACES_API_KEY`, `PUBLIC_URL`.
+1. `copy .env.example .env` and set `APP_SECRET`, `ADMIN_PASSWORD` (and optionally `GOOGLE_PLACES_API_KEY`), `PUBLIC_URL`.
 2. `docker compose up -d` (Postgres, Ollama, app), then `docker compose exec ollama ollama pull llama3.1:8b`.
    Without Docker: run Postgres + Ollama yourself, `npm install`, `npm run migrate`, `npm start`.
 3. Open the admin UI (basic auth), go to **Sender settings**, add your from address, SMTP/IMAP, business name and mailing address, click **Verify**, **Send test**, then **Make active**.
@@ -19,3 +19,9 @@ Each site is audited (no website, unreachable, no HTTPS, not mobile-friendly, sl
 
 ## Dev
 `npm test`, `npm run typecheck`
+
+
+## Lead sources
+- **OpenStreetMap** (default): no key needed. OSM data is incomplete, so a missing website tag may just mean nobody added it; review the findings in the approval queue before sending.
+- **CSV import** on the Dashboard: header row with name (required), website, email, phone, category, city.
+- **Google Places**: optional, needs GOOGLE_PLACES_API_KEY.

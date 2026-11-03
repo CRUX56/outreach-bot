@@ -53,3 +53,8 @@ test("generateDraft accepts valid LLM output", async () => {
   assert.equal(d.usedFallback, false);
   assert.match(d.body, /Sam$/);
 });
+
+import { parseCsv } from "../src/osm.js";
+test("parses quoted CSV", () => {
+  assert.deepEqual(parseCsv('name,website\n"Joe, Inc",joes.com\n'), [['name','website'],['Joe, Inc','joes.com']]);
+});
