@@ -65,11 +65,19 @@ export function buildApp() {
 
   app.post("/search", async (req, res) => {
     try {
-      const search = req.body.source === "google" ? searchPlaces : searchOsm;
-      await search(String(req.body.category), String(req.body.city));
-      await processNewLeads(40);
-      await draftQualified(40);
-      res.redirect("/drafts");
+      const source = req.body.source === "google" ? "google" : "osm";
+      const search = source === "google" ? searchPlaces : searchOsm;
+      const category = String(req.body.category), city = String(req.body.city);
+      const { placeIds } = await search(category, city);
+      await processNewLeads(40, placeIds);
+      await draftQualified(40, placeIds);
+      await q(
+        `INSERT INTO latest_lead_search(singleton, category, city, source, place_ids) VALUES(TRUE,$1,$2,$3,$4)
+         ON CONFLICT (singleton) DO UPDATE SET category=EXCLUDED.category, city=EXCLUDED.city,
+         source=EXCLUDED.source, place_ids=EXCLUDED.place_ids`,
+        [category, city, source, placeIds],
+      );
+      res.redirect("/leads");
     } catch (e: any) { res.status(500).send(page("Error", `<pre>${esc(e.message)}</pre>`)); }
   });
 
@@ -82,11 +90,20 @@ export function buildApp() {
     } catch (e: any) { res.status(500).send(page("Error", `<pre>${esc(e.message)}</pre>`)); }
   });
 
-  app.get("/leads", async (_req, res) => {
-    const rows = await q("SELECT * FROM leads ORDER BY id DESC LIMIT 200");
-    res.send(page("Leads", `<table><tr><th>Name</th><th>Website</th><th>Email</th><th>Status</th><th>Findings</th></tr>${rows.map((l) =>
+  app.get("/leads", async (req, res) => {
+    const [latest] = await q<{ category: string; city: string; source: string; place_ids: string[] }>(
+      "SELECT category, city, source, place_ids FROM latest_lead_search WHERE singleton=TRUE",
+    );
+    const showAll = req.query.view === "all" || !latest;
+    const rows = showAll
+      ? await q("SELECT * FROM leads ORDER BY id DESC LIMIT 200")
+      : await q("SELECT * FROM leads WHERE place_id = ANY($1::text[]) ORDER BY id DESC LIMIT 200", [latest.place_ids]);
+    const heading = showAll
+      ? `<p>Showing all saved leads.${latest ? " <a href=/leads>Latest search</a>" : ""}</p>`
+      : `<p>Latest search: ${esc(latest.category)} in ${esc(latest.city)} (${latest.source === "google" ? "Google Places" : "OpenStreetMap"}). <a href="/leads?view=all">All saved leads</a></p>`;
+    res.send(page("Leads", `${heading}${rows.length ? `<table><tr><th>Name</th><th>Website</th><th>Email</th><th>Status</th><th>Findings</th></tr>${rows.map((l) =>
       `<tr><td>${esc(l.name)}</td><td>${esc(l.website ?? "none")}</td><td>${esc(l.email)}</td><td>${esc(l.status)}</td>
-       <td>${(l.site_findings ?? []).map((f: any) => `<span class=tag title="${esc(f.evidence)}">${esc(f.type)}</span>`).join("")}</td></tr>`).join("")}</table>`));
+       <td>${(l.site_findings ?? []).map((f: any) => `<span class=tag title="${esc(f.evidence)}">${esc(f.type)}</span>`).join("")}</td></tr>`).join("")}</table>` : "<p>No leads found.</p>"}`));
   });
 
   app.get("/drafts", async (_req, res) => {

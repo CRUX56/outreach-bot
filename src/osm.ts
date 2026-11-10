@@ -74,7 +74,8 @@ export async function searchOsm(category: string, city: string, max = 60) {
 
   const els = [...found.values()].filter((x) => x.tags?.name);
   let added = 0;
-  for (const el of els.slice(0, max)) {
+  const selected = els.slice(0, max);
+  for (const el of selected) {
     const t = el.tags;
     const r = await q(
       `INSERT INTO leads(place_id,name,category,city,phone,website,email) VALUES($1,$2,$3,$4,$5,$6,$7)
@@ -84,7 +85,7 @@ export async function searchOsm(category: string, city: string, max = 60) {
     );
     added += r.length;
   }
-  return { found: els.length, added };
+  return { found: els.length, added, placeIds: selected.map((el) => `osm:${el.type}/${el.id}`) };
 }
 
 // Minimal CSV parser supporting quoted fields
@@ -133,4 +134,3 @@ export async function importCsv(text: string) {
   }
   return { found: rows.length, added };
 }
-

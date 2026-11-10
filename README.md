@@ -7,7 +7,9 @@ Self-hosted cold-email bot: finds local businesses with weak/no websites (OpenSt
 2. `docker compose up -d` (Postgres, Ollama, app), then `docker compose exec ollama ollama pull llama3.1:8b`.
    Without Docker: run Postgres + Ollama yourself, `npm install`, `npm run migrate`, `npm start`.
 3. Open the admin UI (basic auth), go to **Sender settings**, add your from address, SMTP/IMAP, business name and mailing address, click **Verify**, **Send test**, then **Make active**.
-4. On the **Dashboard** search a category + city. Leads are audited, weak ones get drafts in the **Approval queue**.
+4. On the **Dashboard** search a category + city. The **Leads** page shows the latest completed search, including businesses already saved by an earlier search. Use **All saved leads** to see earlier searches and CSV imports. Existing leads and drafts are retained; the **Approval queue** contains drafts from all searches. Leads are audited, and weak ones get drafts in the queue.
+
+For an existing installation, run `npm run migrate` before restarting the app. Docker runs migrations when the app container starts.
 
 ## How personalization works
 Each site is audited (no website, unreachable, no HTTPS, not mobile-friendly, slow, outdated, no CTA/SEO, placeholder). The top 3 verified findings go into the Ollama prompt; drafts claiming anything not in the findings are rejected and a findings-based template is used instead. Findings are shown beside each draft.

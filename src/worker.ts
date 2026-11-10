@@ -15,10 +15,13 @@ const ctxFor = (lead: any, p: Profile): DraftContext => ({
 });
 
 // Creates pending first-touch drafts for qualified leads (human approval required before sending)
-export async function draftQualified(limit = 10) {
+export async function draftQualified(limit = 10, placeIds?: string[]) {
   const p = await activeProfile();
   if (!p) return 0;
-  const leads = await q(`SELECT * FROM leads WHERE status='qualified' LIMIT $1`, [limit]);
+  const leads = await q(
+    `SELECT * FROM leads WHERE status='qualified'${placeIds ? " AND place_id = ANY($2::text[])" : ""} LIMIT $1`,
+    placeIds ? [limit, placeIds] : [limit],
+  );
   for (const l of leads) {
     const d = await generateDraft(ctxFor(l, p));
     await q(

@@ -4,9 +4,17 @@ import { config } from "./config.js";
 import { q } from "./db.js";
 import { auditWebsite, isWeak } from "./audit.js";
 
+type Place = {
+  id: string;
+  displayName?: { text?: string };
+  nationalPhoneNumber?: string;
+  websiteUri?: string;
+  rating?: number;
+};
+
 export async function searchPlaces(category: string, city: string, max = 40) {
   if (!config.placesKey) throw new Error("GOOGLE_PLACES_API_KEY not set");
-  const places: any[] = [];
+  const places: Place[] = [];
   let pageToken: string | undefined;
   do {
     const res = await fetch("https://places.googleapis.com/v1/places:searchText", {
@@ -19,13 +27,14 @@ export async function searchPlaces(category: string, city: string, max = 40) {
       body: JSON.stringify({ textQuery: `${category} in ${city}`, pageSize: 20, ...(pageToken && { pageToken }) }),
     });
     if (!res.ok) throw new Error(`Places API ${res.status}: ${await res.text()}`);
-    const j: any = await res.json();
+    const j = await res.json() as { places?: Place[]; nextPageToken?: string };
     places.push(...(j.places ?? []));
     pageToken = j.nextPageToken;
   } while (pageToken && places.length < max);
 
   let added = 0;
-  for (const p of places.slice(0, max)) {
+  const selected = places.slice(0, max);
+  for (const p of selected) {
     const r = await q(
       `INSERT INTO leads(place_id,name,category,city,phone,website,rating) VALUES($1,$2,$3,$4,$5,$6,$7)
        ON CONFLICT (place_id) DO NOTHING RETURNING id`,
@@ -33,7 +42,7 @@ export async function searchPlaces(category: string, city: string, max = 40) {
     );
     added += r.length;
   }
-  return { found: places.length, added };
+  return { found: places.length, added, placeIds: selected.map((p) => p.id) };
 }
 
 const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
@@ -66,8 +75,11 @@ export async function hasMx(email: string): Promise<boolean> {
 }
 
 // Audits new leads, then finds and MX-checks emails for the weak ones
-export async function processNewLeads(limit = 25) {
-  const leads = await q("SELECT id, website, email FROM leads WHERE status='new' LIMIT $1", [limit]);
+export async function processNewLeads(limit = 25, placeIds?: string[]) {
+  const leads = await q(
+    `SELECT id, website, email FROM leads WHERE status='new'${placeIds ? " AND place_id = ANY($2::text[])" : ""} LIMIT $1`,
+    placeIds ? [limit, placeIds] : [limit],
+  );
   for (const l of leads) {
     const findings = await auditWebsite(l.website);
     const weak = isWeak(findings);
