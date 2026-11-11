@@ -13,12 +13,16 @@ test("latest search displays its results while retaining all saved leads", async
   t.after(() => { config.adminPassword = originalPassword; config.placesKey = originalKey; });
 
   const leads: { id: number; place_id: string; name: string; status: string }[] = [];
-  let latest: { category: string; city: string; source: string; place_ids: string[] } | undefined;
+  let latest: { category: string; city: string; source: string; place_ids: string[]; generation: number } | undefined;
+  let generation = 0;
   const processed: string[][] = [];
   const drafted: string[][] = [];
+  let migrationMissing = false;
   const fakeQuery = async (sql: string, params: unknown[] = []) => {
     let rows: object[] = [];
-    if (sql.includes("INSERT INTO leads")) {
+    if (sql.includes("nextval('lead_search_generation_seq')")) {
+      rows = [{ generation: ++generation }];
+    } else if (sql.includes("INSERT INTO leads")) {
       const [placeId, name] = params as string[];
       if (!leads.some((l) => l.place_id === placeId)) {
         const lead = { id: leads.length + 1, place_id: placeId, name, status: "new" };
@@ -34,13 +38,17 @@ test("latest search displays its results while retaining all saved leads", async
       assert.match(sql, /place_id = ANY/);
       drafted.push(params[1] as string[]);
     } else if (sql.includes("INSERT INTO latest_lead_search")) {
-      const [category, city, source, placeIds] = params;
-      latest = { category: String(category), city: String(city), source: String(source), place_ids: placeIds as string[] };
+      const [category, city, source, placeIds, searchGeneration] = params;
+      if (!latest || latest.generation < Number(searchGeneration)) latest = { category: String(category), city: String(city), source: String(source), place_ids: placeIds as string[], generation: Number(searchGeneration) };
     } else if (sql.includes("FROM latest_lead_search")) {
+      if (migrationMissing) throw Object.assign(new Error("relation does not exist"), { code: "42P01" });
       rows = latest ? [latest] : [];
-    } else if (sql.includes("SELECT * FROM leads")) {
+    } else if (sql.includes("SELECT l.*") && sql.includes("FROM leads l")) {
       const ids = params[0] as string[] | undefined;
-      rows = ids ? leads.filter((l) => ids.includes(l.place_id)) : leads;
+      if (ids) {
+        assert.match(sql, /ORDER BY array_position/);
+        rows = ids.flatMap((id) => leads.filter((l) => l.place_id === id));
+      } else rows = leads;
     } else {
       throw new Error(`Unexpected query: ${sql}`);
     }
@@ -50,9 +58,20 @@ test("latest search displays its results while retaining all saved leads", async
 
   let results: { id: string; displayName: { text: string } }[] = [];
   let fail = false;
+  let race = false;
+  let releaseOlder: (() => void) | undefined;
+  let olderStarted: (() => void) | undefined;
   const realFetch = globalThis.fetch;
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
     if (String(input).startsWith("https://places.googleapis.com/")) {
+      if (race) {
+        const request = JSON.parse(String(init?.body)) as { textQuery: string };
+        if (request.textQuery.startsWith("older ")) {
+          await new Promise<void>((resolve) => { releaseOlder = resolve; olderStarted?.(); });
+          return Response.json({ places: [{ id: "older-race", displayName: { text: "Older race" } }] });
+        }
+        return Response.json({ places: [{ id: "newer-race", displayName: { text: "Newer race" } }] });
+      }
       return fail
         ? new Response("unavailable", { status: 503 })
         : Response.json({ places: results });
@@ -80,6 +99,11 @@ test("latest search displays its results while retaining all saved leads", async
     redirect: "manual",
   });
 
+  migrationMissing = true;
+  const migrationError = await get("/leads");
+  assert.equal(migrationError.status, 503);
+  assert.match(await migrationError.text(), /npm run migrate/);
+  migrationMissing = false;
   assert.match(await (await get("/leads")).text(), /Showing all saved leads/);
   results = [{ id: "old", displayName: { text: "Old business" } }, { id: "shared", displayName: { text: "Shared business" } }];
   assert.equal((await search("plumber")).headers.get("location"), "/leads");
@@ -90,6 +114,7 @@ test("latest search displays its results while retaining all saved leads", async
   assert.match(current, /New business/);
   assert.match(current, /Shared business/);
   assert.doesNotMatch(current, /Old business/);
+  assert.ok(current.indexOf("New business") < current.indexOf("Shared business"));
   assert.deepEqual(processed, [["old", "shared"], ["new", "shared"]]);
   assert.deepEqual(drafted, processed);
   const all = await (await get("/leads?view=all")).text();
@@ -113,4 +138,17 @@ test("latest search displays its results while retaining all saved leads", async
   assert.equal((await search("failed")).status, 500);
   assert.match(await (await get("/leads")).text(), /Latest search: empty in Austin/);
   assert.match(await (await get("/leads?view=all")).text(), /Old business/);
+
+  race = true;
+  const started = new Promise<void>((resolve) => { olderStarted = resolve; });
+  const older = search("older");
+  await started;
+  assert.equal((await search("newer")).status, 302);
+  assert.ok(releaseOlder);
+  releaseOlder();
+  assert.equal((await older).status, 302);
+  const afterRace = await (await get("/leads")).text();
+  assert.match(afterRace, /Latest search: newer in Austin/);
+  assert.match(afterRace, /Newer race/);
+  assert.doesNotMatch(afterRace, /Older race/);
 });

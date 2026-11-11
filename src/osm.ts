@@ -26,23 +26,26 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 type El = { type: string; id: number; tags: Record<string, string> };
 
 // Nominatim keyword search: fast, returns website/email/phone in extratags. Public policy: max 1 req/sec.
-async function nominatimSearch(category: string, view: string): Promise<El[]> {
+async function nominatimSearch(category: string, view: string): Promise<{ elements: El[]; succeeded: boolean }> {
   const key = category.trim().toLowerCase();
   const out = new Map<string, El>();
+  let succeeded = false;
   for (const term of [key, ...(ALIASES[key] ?? [])]) {
     const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&extratags=1&limit=40&bounded=1&viewbox=${view}&q=${encodeURIComponent(term)}`, { headers: UA, signal: AbortSignal.timeout(30000) });
-    if (r.ok)
+    if (r.ok) {
+      succeeded = true;
       for (const x of (await r.json()) as any[]) {
         const name = x.name || x.display_name?.split(",")[0];
         if (name) out.set(`${x.osm_type}/${x.osm_id}`, { type: x.osm_type, id: x.osm_id, tags: { name, ...x.extratags } });
       }
+    }
     await sleep(1100);
   }
-  return [...out.values()];
+  return { elements: [...out.values()], succeeded };
 }
 
 // Overpass tag search: more complete but public servers are often overloaded, so failures are non-fatal
-async function overpassSearch(category: string, bbox: string, max: number): Promise<El[]> {
+async function overpassSearch(category: string, bbox: string, max: number): Promise<El[] | null> {
   const key = category.trim().toLowerCase();
   const tags = TAGS[key];
   const filters = tags ? tags.map((t) => { const [k, v] = t.split("="); return `["${k}"="${v}"]`; }) : [`["name"~"${esc(key)}",i]`];
@@ -57,7 +60,7 @@ async function overpassSearch(category: string, bbox: string, max: number): Prom
       if (res.ok) return (((await res.json()) as any).elements ?? []) as El[];
     } catch {}
   }
-  return [];
+  return null;
 }
 
 export async function searchOsm(category: string, city: string, max = 60) {
@@ -68,9 +71,13 @@ export async function searchOsm(category: string, city: string, max = 60) {
   await sleep(1100);
 
   const found = new Map<string, El>();
-  for (const el of await nominatimSearch(category, `${w},${n},${e},${s}`)) found.set(`${el.type}/${el.id}`, el);
-  if (found.size < 10)
-    for (const el of await overpassSearch(category, `${s},${w},${n},${e}`, max)) found.set(`${el.type}/${el.id}`, el);
+  const nominatim = await nominatimSearch(category, `${w},${n},${e},${s}`);
+  for (const el of nominatim.elements) found.set(`${el.type}/${el.id}`, el);
+  if (found.size < 10) {
+    const overpass = await overpassSearch(category, `${s},${w},${n},${e}`, max);
+    if (!nominatim.succeeded && overpass === null) throw new Error("OpenStreetMap search services are unavailable; try again later");
+    for (const el of overpass ?? []) found.set(`${el.type}/${el.id}`, el);
+  }
 
   const els = [...found.values()].filter((x) => x.tags?.name);
   let added = 0;

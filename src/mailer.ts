@@ -1,9 +1,12 @@
 import nodemailer from "nodemailer";
 import { ImapFlow } from "imapflow";
 import dns from "node:dns/promises";
+import crypto from "node:crypto";
+import { isIP } from "node:net";
 import { q } from "./db.js";
-import { decrypt, unsubToken } from "./crypto.js";
+import { decrypt } from "./crypto.js";
 import { config } from "./config.js";
+import { normalizeEmail } from "./suppression.js";
 
 export interface Profile {
   id: number; from_name: string; from_email: string; reply_to: string | null;
@@ -19,17 +22,34 @@ export const transportFor = (p: Profile) =>
     auth: { user: p.smtp_user, pass: decrypt(p.smtp_pass_enc) },
   });
 
-export const unsubUrl = (leadId: number) => `${config.publicUrl}/unsubscribe/${leadId}/${unsubToken(leadId)}`;
+export function commercialProfileError(p: Profile): string | null {
+  if (!p.business_name?.trim() || !p.mailing_address?.trim() || !p.from_name?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(p.from_email?.trim() ?? "")) {
+    return "Sender name, email, business name and mailing address are required";
+  }
+  let url: URL;
+  try { url = new URL(config.publicUrl); } catch { return "PUBLIC_URL must be a publicly reachable HTTPS URL"; }
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash ||
+      isIP(host.replace(/^\[|\]$/g, "")) || !host.includes(".") || host.endsWith(".localhost") || host.endsWith(".local")) {
+    return "PUBLIC_URL must be a publicly reachable HTTPS URL";
+  }
+  return null;
+}
 
-export function composeMessage(p: Profile, to: string, subject: string, body: string, leadId: number) {
-  const url = unsubUrl(leadId);
-  const footer = `\n\n--\n${p.business_name}, ${p.mailing_address}\nNot interested? Unsubscribe: ${url}`;
+export async function createUnsubscribeUrl(leadId: number, email: string): Promise<string> {
+  const token = crypto.randomBytes(32).toString("base64url");
+  await q("INSERT INTO unsubscribe_links(token,email,lead_id) VALUES($1,$2,$3)", [token, normalizeEmail(email), leadId]);
+  return `${config.publicUrl}/unsubscribe-link/${token}`;
+}
+
+export function composeMessage(p: Profile, to: string, subject: string, body: string, url: string) {
+  const footer = `\n\n--\nAdvertisement from ${p.business_name}\n${p.mailing_address}\nTo opt out of future emails, visit: ${url}`;
   return {
     from: `"${p.from_name}" <${p.from_email}>`,
     replyTo: p.reply_to ?? undefined,
     to, subject,
     text: body + footer,
-    headers: { "List-Unsubscribe": `<${url}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
+    headers: { "List-Unsubscribe": `<${url}>` },
   };
 }
 
@@ -52,6 +72,9 @@ export async function checkDns(domain: string) {
 }
 
 export async function sendTest(p: Profile, to: string) {
-  const info = await transportFor(p).sendMail(composeMessage(p, to, "Test from outreach bot", "This is a test message.", 0));
+  const info = await transportFor(p).sendMail({
+    from: `"${p.from_name}" <${p.from_email}>`, replyTo: p.reply_to ?? undefined, to,
+    subject: "Test from outreach bot", text: "This is a sender configuration test, not a commercial email.",
+  });
   return info.messageId;
 }

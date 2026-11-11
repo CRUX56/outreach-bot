@@ -2,8 +2,9 @@ import { ImapFlow } from "imapflow";
 import { q } from "./db.js";
 import { decrypt } from "./crypto.js";
 import { generateDraft, templateDraft, type DraftContext } from "./drafts.js";
-import { composeMessage, transportFor, type Profile } from "./mailer.js";
+import { commercialProfileError, composeMessage, createUnsubscribeUrl, transportFor, type Profile } from "./mailer.js";
 import { processNewLeads } from "./leads.js";
+import { normalizeEmail, suppressEmail, withEmailLock } from "./suppression.js";
 
 const activeProfile = async (): Promise<Profile | undefined> =>
   (await q<Profile>("SELECT * FROM sender_profiles WHERE active LIMIT 1"))[0];
@@ -74,19 +75,44 @@ export async function sendNext(): Promise<boolean> {
      ORDER BY d.step, d.id LIMIT 1`, [p.id]);
   if (!d) return false;
 
-  const suppressed = d.email && (await q("SELECT 1 FROM suppression WHERE email=$1", [d.email])).length;
-  if (!d.email || suppressed || ["unsubscribed", "replied"].includes(d.lead_status)) {
-    await q("UPDATE drafts SET status='rejected', error='suppressed or no longer eligible' WHERE id=$1", [d.id]);
+  const profileError = commercialProfileError(p);
+  if (profileError) {
+    console.error(`[send] Commercial sending blocked: ${profileError}`);
+    return false;
+  }
+  if (!d.subject?.trim() || !d.body?.trim()) {
+    await q("UPDATE drafts SET status='failed', error='Subject and body are required' WHERE id=$1 AND status='approved'", [d.id]);
     return true;
   }
-  try {
-    const info = await transportFor(p).sendMail(composeMessage(p, d.email, d.subject, d.body, d.lead_id));
-    await q("UPDATE drafts SET status='sent', sent_at=now(), message_id=$2 WHERE id=$1", [d.id, info.messageId]);
-    await q("UPDATE leads SET status='contacted' WHERE id=$1 AND status IN ('drafted','contacted')", [d.lead_id]);
-    await q("INSERT INTO events(lead_id,type) VALUES($1,'sent')", [d.lead_id]);
-  } catch (e: any) {
-    await q("UPDATE drafts SET status='failed', error=$2 WHERE id=$1", [d.id, String(e.message).slice(0, 500)]);
+  if (!d.email) {
+    await q("UPDATE drafts SET status='rejected', error='no recipient email' WHERE id=$1 AND status='approved'", [d.id]);
+    return true;
   }
+  const email = normalizeEmail(d.email);
+  const url = await createUnsubscribeUrl(d.lead_id, email);
+  await withEmailLock(email, async (client) => {
+    const [current] = (await client.query(
+      `SELECT d.*, l.email, l.status AS lead_status FROM drafts d JOIN leads l ON l.id=d.lead_id
+       WHERE d.id=$1 AND d.status='approved' FOR UPDATE OF d, l`, [d.id])).rows;
+    if (!current || normalizeEmail(current.email ?? "") !== email) return;
+    const suppressed = (await client.query("SELECT 1 FROM suppression WHERE lower(trim(email))=$1 LIMIT 1", [email])).rowCount;
+    if (suppressed || ["unsubscribed", "replied"].includes(current.lead_status)) {
+      await client.query("UPDATE drafts SET status='rejected', error='suppressed or no longer eligible' WHERE id=$1", [d.id]);
+      return;
+    }
+    if (!current.subject?.trim() || !current.body?.trim()) {
+      await client.query("UPDATE drafts SET status='failed', error='Subject and body are required' WHERE id=$1", [d.id]);
+      return;
+    }
+    try {
+      const info = await transportFor(p).sendMail(composeMessage(p, email, current.subject, current.body, url));
+      await client.query("UPDATE drafts SET status='sent', sent_at=now(), message_id=$2 WHERE id=$1", [d.id, info.messageId]);
+      await client.query("UPDATE leads SET status='contacted' WHERE id=$1 AND status IN ('drafted','contacted')", [d.lead_id]);
+      await client.query("INSERT INTO events(lead_id,type) VALUES($1,'sent')", [d.lead_id]);
+    } catch (e: any) {
+      await client.query("UPDATE drafts SET status='failed', error=$2 WHERE id=$1", [d.id, String(e.message).slice(0, 500)]);
+    }
+  });
   return true;
 }
 
@@ -113,8 +139,7 @@ export async function pollReplies() {
       const kind = classify(m.envelope?.subject ?? "", text, from);
       const [row] = await q("SELECT email FROM leads WHERE id=$1", [lead.id]);
       if (kind === "bounce" || kind === "unsubscribe") {
-        await q("INSERT INTO suppression(email,reason) VALUES($1,$2) ON CONFLICT DO NOTHING", [row.email, kind]);
-        await q("UPDATE leads SET status='unsubscribed' WHERE id=$1", [lead.id]);
+        await suppressEmail(row.email, kind);
       } else await q("UPDATE leads SET status='replied' WHERE id=$1", [lead.id]);
       await q("UPDATE drafts SET status='rejected', error='lead responded' WHERE lead_id=$1 AND status IN ('pending','approved')", [lead.id]);
       await q("INSERT INTO events(lead_id,type,detail) VALUES($1,$2,$3)", [lead.id, kind, JSON.stringify({ subject: m.envelope?.subject })]);

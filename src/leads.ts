@@ -89,7 +89,7 @@ export async function processNewLeads(limit = 25, placeIds?: string[]) {
       email = l.email ?? (await findEmail(l.website));
       verified = email ? await hasMx(email) : false;
     }
-    const sup = email ? await q("SELECT 1 FROM suppression WHERE email=$1", [email]) : [];
+    const sup = email ? await q("SELECT 1 FROM suppression WHERE lower(trim(email))=lower(trim($1))", [email]) : [];
     const status = !weak ? "disqualified" : email && verified && !sup.length ? "qualified" : "disqualified";
     await q(
       "UPDATE leads SET site_findings=$1, email=$2, email_verified=$3, status=$4, audited_at=now() WHERE id=$5",
