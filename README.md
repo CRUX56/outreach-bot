@@ -12,6 +12,8 @@ Self-hosted cold-email bot: finds local businesses with weak/no websites (OpenSt
 
 For an existing installation, run `npm run migrate` before restarting the app. Docker runs migrations when the app container starts.
 
+After changing application files, rebuild the Docker app image with `docker compose up -d --no-deps --build app`. A plain container restart does not include updated source files. Refresh the browser after the app starts.
+
 ## How personalization works
 Each site is audited (no website, unreachable, no HTTPS, not mobile-friendly, slow, outdated, no CTA/SEO, placeholder). The top 3 verified findings go into the Ollama prompt; drafts claiming anything not in the findings are rejected and a findings-based template is used instead. Findings are shown beside each draft.
 
