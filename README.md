@@ -44,6 +44,14 @@ Workflow:
 `npm test`, `npm run typecheck`, `npm run build:css`. `npm start` builds the local Tailwind stylesheet before launching the server; `npm run dev` requires `npm run build:css` first and after styling changes. The optional PostgreSQL/SMTP integration test creates and removes an isolated test schema in the configured database: build CSS, explicitly set `DATABASE_URL` and `TEST_INTEGRATION=1`, and run `npm test` with a database user allowed to create schemas.
 
 
+## Call list
+Businesses with no website rarely publish an email address, so they used to be disqualified. Now a weak-website lead with no usable email but a valid phone number gets the status `call_first` and appears on the **Call list** page (tap-to-call links). After you call or visit:
+- **Got their email**: enter it, and the bot checks the domain can receive mail, marks the lead qualified and drafts a first email for your approval.
+- **They agree to texts**: use **Record text consent**.
+- **Not interested**: removes them from the list (status `declined`).
+
+Leads whose email address is on the do-not-email list are not added to the call list.
+
 ## Lead sources
 - **OpenStreetMap** (default): no key needed. OSM data is incomplete, so a missing website tag may just mean nobody added it; review the findings in the approval queue before sending.
 - **CSV import** on the Dashboard: header row with name (required), website, email, phone, category, city.

@@ -3,6 +3,7 @@ import dns from "node:dns/promises";
 import { config } from "./config.js";
 import { q } from "./db.js";
 import { auditWebsite, isWeak } from "./audit.js";
+import { leadStatus } from "./leadStatus.js";
 
 type Place = {
   id: string;
@@ -74,10 +75,12 @@ export async function hasMx(email: string): Promise<boolean> {
   try { return (await dns.resolveMx(email.split("@")[1])).length > 0; } catch { return false; }
 }
 
-// Audits new leads, then finds and MX-checks emails for the weak ones
+// Audits new leads, then finds and MX-checks emails for the weak ones.
+// Weak leads with no usable email but a valid phone go to the call list (status call_first)
+// instead of being dropped: businesses with no website rarely publish an email address.
 export async function processNewLeads(limit = 25, placeIds?: string[]) {
   const leads = await q(
-    `SELECT id, website, email FROM leads WHERE status='new'${placeIds ? " AND place_id = ANY($2::text[])" : ""} LIMIT $1`,
+    `SELECT id, website, email, phone FROM leads WHERE status='new'${placeIds ? " AND place_id = ANY($2::text[])" : ""} LIMIT $1`,
     placeIds ? [limit, placeIds] : [limit],
   );
   for (const l of leads) {
@@ -90,7 +93,7 @@ export async function processNewLeads(limit = 25, placeIds?: string[]) {
       verified = email ? await hasMx(email) : false;
     }
     const sup = email ? await q("SELECT 1 FROM suppression WHERE lower(trim(email))=lower(trim($1))", [email]) : [];
-    const status = !weak ? "disqualified" : email && verified && !sup.length ? "qualified" : "disqualified";
+    const status = leadStatus({ weak, email, verified, suppressed: sup.length > 0, phone: l.phone });
     await q(
       "UPDATE leads SET site_findings=$1, email=$2, email_verified=$3, status=$4, audited_at=now() WHERE id=$5",
       [JSON.stringify(findings), email, verified, status, l.id],
