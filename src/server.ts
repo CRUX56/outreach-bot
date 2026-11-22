@@ -5,6 +5,7 @@ import { q } from "./db.js";
 import { encrypt, unsubToken } from "./crypto.js";
 import { searchPlaces, processNewLeads } from "./leads.js";
 import { draftQualified } from "./worker.js";
+import { hasMx } from "./leads.js";
 import { searchOsm, importCsv } from "./osm.js";
 import { checkDns, commercialProfileError, sendTest, verifyProfile, type Profile } from "./mailer.js";
 import { normalizeEmail, suppressEmail, withEmailLock } from "./suppression.js";
@@ -15,7 +16,7 @@ const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "
 const page = (title: string, body: string, publicPage = false) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)} | Outreach Bot</title><link rel="stylesheet" href="/styles.css"></head>
 <body class="min-h-screen bg-slate-50 text-slate-800">
-${publicPage ? "" : `<header class="border-b border-slate-200 bg-white"><div class="mx-auto flex max-w-7xl flex-wrap items-center gap-6 px-4 py-4 sm:px-6"><a class="text-lg font-bold text-indigo-700" href="/">Outreach Bot</a><nav aria-label="Main navigation" class="flex flex-wrap gap-4 text-sm font-medium text-slate-600"><a href="/">Dashboard</a><a href="/leads">Leads</a><a href="/drafts">Approval queue</a><a href="/settings">Sender settings</a><a href="/suppression">Do not email</a><a href="/sms-suppression">Do not text</a></nav></div></header>`}
+${publicPage ? "" : `<header class="border-b border-slate-200 bg-white"><div class="mx-auto flex max-w-7xl flex-wrap items-center gap-6 px-4 py-4 sm:px-6"><a class="text-lg font-bold text-indigo-700" href="/">Outreach Bot</a><nav aria-label="Main navigation" class="flex flex-wrap gap-4 text-sm font-medium text-slate-600"><a href="/">Dashboard</a><a href="/leads">Leads</a><a href="/calls">Call list</a><a href="/drafts">Approval queue</a><a href="/settings">Sender settings</a><a href="/suppression">Do not email</a><a href="/sms-suppression">Do not text</a></nav></div></header>`}
 <main class="mx-auto max-w-7xl px-4 py-8 sm:px-6"><h1 class="mb-6 text-3xl font-bold tracking-tight text-slate-900">${esc(title)}</h1>${body}</main></body></html>`;
 
 const safeEqual = (a: string, b: string) => {
@@ -159,11 +160,11 @@ export function buildApp() {
       : await q("SELECT l.*, EXISTS (SELECT 1 FROM drafts d WHERE d.lead_id=l.id AND d.status='pending' AND d.channel='email') AND l.email IS NOT NULL AND trim(l.email) <> '' AND l.status NOT IN ('unsubscribed','replied') AND NOT EXISTS (SELECT 1 FROM suppression s WHERE lower(trim(s.email))=lower(trim(l.email))) AS has_pending FROM leads l WHERE l.place_id = ANY($1::text[]) ORDER BY array_position($1::text[], l.place_id) LIMIT 200", [latest.place_ids]);
     const heading = showAll
       ? `<p>Showing all saved leads (up to 200 most recent).${latest ? " <a href=/leads>Latest search</a>" : ""}</p>`
-      : `<p>Latest search: ${esc(latest.category)} in ${esc(latest.city)} (${latest.source === "google" ? "Google Places" : "OpenStreetMap"}). <a href="/leads?view=all">All saved leads</a></p>`;
+      : `<p>Latest search: ${esc(latest.category)} in ${esc(latest.city)} (${latest.source === "google" ? "Google Places" : "OpenStreetMap"}). <a href="/leads?view=all">All saved leads</a> · <a href="/calls">Call list</a></p>`;
     res.send(page("Leads", `<div class="card">${heading}<p class="my-4 text-sm text-slate-600">Select leads with pending drafts, then review their messages individually. Selection does not send emails or pause previously approved drafts.</p>${rows.length ? `<form method="get" action="/drafts" id="lead-selection">
       <input type="hidden" name="selected" value="1"><div class="mb-4 flex flex-wrap items-center gap-4"><button class="button" type="submit">Review selected drafts</button><span id="selection-count" aria-live="polite">0 selected</span><a href="/drafts">View all drafts</a></div>
-      <div class="overflow-x-auto"><table><thead><tr><th><label class="sr-only" for="select-all">Select all eligible visible leads</label><input id="select-all" type="checkbox"></th><th>Name</th><th>Website</th><th>Email</th><th>Status</th><th>Findings</th><th>Text</th></tr></thead><tbody>${rows.map((l) =>
-      `<tr><td><input type="checkbox" name="lead" value="${l.id}" aria-label="Select ${esc(l.name)}"${l.has_pending ? "" : " disabled"}></td><td>${esc(l.name)}</td><td>${esc(l.website ?? "none")}</td><td>${esc(l.email)}</td><td>${esc(l.status)}${l.has_pending ? "" : " · not eligible for review"}</td>
+      <div class="overflow-x-auto"><table><thead><tr><th><label class="sr-only" for="select-all">Select all eligible visible leads</label><input id="select-all" type="checkbox"></th><th>Name</th><th>Website</th><th>Phone</th><th>Email</th><th>Status</th><th>Findings</th><th>Text</th></tr></thead><tbody>${rows.map((l) =>
+      `<tr><td><input type="checkbox" name="lead" value="${l.id}" aria-label="Select ${esc(l.name)}"${l.has_pending ? "" : " disabled"}></td><td>${esc(l.name)}</td><td>${esc(l.website ?? "none")}</td><td>${esc(l.phone ?? "")}</td><td>${esc(l.email)}</td><td>${esc(l.status)}${l.has_pending ? "" : " · not eligible for review"}</td>
        <td>${(l.site_findings ?? []).map((f: any) => `<span class=tag title="${esc(f.evidence)}">${esc(f.type)}</span>`).join("")}</td>
        <td><a href="/leads/${l.id}/sms">${l.sms_consent_at ? "Consented · text" : "Record consent"}</a></td></tr>`).join("")}</tbody></table></div></form>
       <script src="/selection.js" defer></script>` : "<p>No leads found.</p>"}</div>`));
@@ -326,6 +327,46 @@ export function buildApp() {
     if (!phone) return res.status(400).send(page("Invalid phone", "<p>Enter a valid phone number.</p>"));
     await suppressPhone(phone, "manual opt-out");
     res.redirect(`/sms-suppression?msg=${encodeURIComponent("Number added to the do-not-text list.")}`);
+  });
+
+  // Call list: weak-website leads with a phone number but no email found (usually no website at all).
+  app.get("/calls", async (req, res) => {
+    const rows = await q("SELECT * FROM leads WHERE status='call_first' ORDER BY id DESC LIMIT 200");
+    const msg = req.query.msg ? `<p role="status" class="mb-4">${esc(req.query.msg)}</p>` : "";
+    const tel = (p: string | null) => { const n = normalizePhone(p); return n ? `<a href="tel:${n}">${esc(p)}</a>` : esc(p); };
+    res.send(page("Call list", `${msg}<p class="mb-4 text-slate-600">These businesses have a weak or missing website and no email address the bot could find, so a phone call or visit is the first touch. If they give you an email address, add it here to draft an email for your approval. If they agree to texts, record consent on the Text page.</p>
+      ${rows.length ? rows.map((l) => `<div class=card>
+        <p><b>${esc(l.name)}</b> · ${tel(l.phone)} · ${esc(l.category ?? "")}${l.city ? ` · ${esc(l.city)}` : ""} · ${esc(l.website ?? "no website")}</p>
+        <p class="my-2">${(l.site_findings ?? []).map((f: any) => `<span class=tag title="${esc(f.evidence)}">${esc(f.type)}</span>`).join("")}</p>
+        <form method=post action=/calls/${l.id}/email class="flex flex-wrap items-end gap-2"><div><label for="call-email-${l.id}">Email they gave you</label><input id="call-email-${l.id}" name=email type=email required></div><button>Save &amp; draft email</button></form>
+        <p class="mt-2"><a href="/leads/${l.id}/sms">Record text consent</a></p>
+        <form method=post action=/calls/${l.id}/decline class="mt-2"><button>Not interested: remove from list</button></form>
+      </div>`).join("") : "<p>No leads waiting for a call.</p>"}`));
+  });
+
+  app.post("/calls/:id/email", async (req, res) => {
+    const id = leadId(req.params.id);
+    const email = typeof req.body.email === "string" ? normalizeEmail(req.body.email) : "";
+    if (!id || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).send(page("Invalid email", '<p>Enter a valid email address. <a href="/calls">Back to call list</a></p>'));
+    if ((await q("SELECT 1 FROM suppression WHERE lower(trim(email))=$1", [email])).length) {
+      return res.status(400).send(page("Address opted out", '<p>This address is on the do-not-email list. <a href="/calls">Back to call list</a></p>'));
+    }
+    if (!(await hasMx(email))) return res.status(400).send(page("Email domain can't receive mail", '<p>That address\'s domain has no mail server. Double-check it with the business. <a href="/calls">Back to call list</a></p>'));
+    const [lead] = await q<{ place_id: string }>(
+      "UPDATE leads SET email=$2, email_verified=TRUE, status='qualified' WHERE id=$1 AND status='call_first' RETURNING place_id", [id, email]);
+    if (!lead) return res.status(400).send(page("Lead not on call list", '<p><a href="/calls">Back to call list</a></p>'));
+    await q("INSERT INTO events(lead_id,type,detail) VALUES($1,'email_collected',$2)", [id, JSON.stringify({ email })]);
+    const drafted = await draftQualified(1, [lead.place_id]);
+    res.redirect(drafted ? "/drafts" : `/calls?msg=${encodeURIComponent("Email saved. Set up an active sender profile to draft the email.")}`);
+  });
+
+  app.post("/calls/:id/decline", async (req, res) => {
+    const id = leadId(req.params.id);
+    if (id) {
+      await q("UPDATE leads SET status='declined' WHERE id=$1 AND status='call_first'", [id]);
+      await q("INSERT INTO events(lead_id,type) VALUES($1,'declined_by_phone')", [id]);
+    }
+    res.redirect(`/calls?msg=${encodeURIComponent("Removed from the call list.")}`);
   });
 
   app.get("/suppression", async (req, res) => {
