@@ -37,7 +37,7 @@ test("selection, sending and opt-outs work against PostgreSQL", { skip: process.
   const { sendNext } = await import("../src/worker.js");
   const { suppressEmail } = await import("../src/suppression.js");
   const { composeMessage, commercialProfileError } = await import("../src/mailer.js");
-  for (const migration of ["001_init.sql", "002_latest_lead_search.sql", "003_search_generation.sql", "004_unsubscribe_links.sql"]) {
+  for (const migration of ["001_init.sql", "002_latest_lead_search.sql", "003_search_generation.sql", "004_unsubscribe_links.sql", "005_sms.sql"]) {
     await pool.query(await fs.readFile(path.join("migrations", migration), "utf8"));
   }
 

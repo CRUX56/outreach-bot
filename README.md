@@ -24,6 +24,22 @@ Each site is audited (no website, unreachable, no HTTPS, not mobile-friendly, sl
 - Check the sender's reply inbox and other channels regularly. Add requests received outside the link through **Do not email** immediately; the federal deadline is 10 business days. Configure and verify IMAP for automatic reply monitoring, but do not rely on automatic detection alone. Bounces and replies also stop further mail.
 - Daily cap, send window and randomized spacing are configured per sender profile; start low (about 20/day) and warm up the domain. Use a dedicated sending domain with SPF/DKIM/DMARC. Review approved drafts after updates and before enabling the worker. Failed sends appear in the Approval queue; verify delivery with your provider before retrying because some SMTP failures leave delivery uncertain.
 
+## Text messages (SMS via Twilio)
+Texts are for leads who have **agreed to receive texts** — for example someone who replied to your email with "text me at…", or filled in a form with an SMS consent checkbox. Under the TCPA, automated marketing texts require the recipient's prior express written consent (statutory damages are $500–$1,500 per message), and carriers require proof of opt-in for 10DLC registration. A number pulled from a directory, Google, OpenStreetMap or a website is **not** consent, so the bot never texts a lead automatically.
+
+Setup:
+1. In Twilio, buy a local number and complete **A2P 10DLC** brand and campaign registration (use case: marketing/customer care; describe how people opt in). US texts from unregistered numbers are blocked.
+2. Leave Twilio's **Advanced Opt-Out** on (default). It sends the STOP/START/HELP confirmations.
+3. In the number's settings, set **A message comes in** to `POST {PUBLIC_URL}/sms/inbound`.
+4. In **Sender settings**, fill in the Twilio Account SID, Auth Token, phone number (E.164, e.g. `+17045551234`) and daily text cap, save, then use **Send test text** on your own phone.
+
+Workflow:
+- On **Leads**, click **Record consent** next to a lead, enter their mobile number and how/when they agreed (stored as your consent record), and confirm.
+- Write a text on the same page; it goes into the **Approval queue** under *Text messages*. Approved texts send one at a time, 1–3 minutes apart, only between 8am and 9pm (and inside the sender's window) in the profile's timezone, under the daily text cap.
+- Every text is prefixed with your business name and ends with "Reply STOP to opt out."
+- Replies of STOP/UNSUBSCRIBE/CANCEL/END/QUIT, or phrases like "stop texting me" or "wrong number", add the number to **Do not text** and cancel queued texts. START re-subscribes. Any other reply marks the lead *replied* and cancels queued texts so you can answer personally.
+- Add numbers to **Do not text** whenever someone opts out another way.
+
 ## Dev
 `npm test`, `npm run typecheck`, `npm run build:css`. `npm start` builds the local Tailwind stylesheet before launching the server; `npm run dev` requires `npm run build:css` first and after styling changes. The optional PostgreSQL/SMTP integration test creates and removes an isolated test schema in the configured database: build CSS, explicitly set `DATABASE_URL` and `TEST_INTEGRATION=1`, and run `npm test` with a database user allowed to create schemas.
 

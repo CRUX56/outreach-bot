@@ -5,9 +5,10 @@ import { generateDraft, templateDraft, type DraftContext } from "./drafts.js";
 import { commercialProfileError, composeMessage, createUnsubscribeUrl, transportFor, type Profile } from "./mailer.js";
 import { processNewLeads } from "./leads.js";
 import { normalizeEmail, suppressEmail, withEmailLock } from "./suppression.js";
+import { composeCommercialSms, normalizePhone, smsProfileError, smsWindow, twilioSend, withPhoneLock, type SmsProfile } from "./sms.js";
 
-const activeProfile = async (): Promise<Profile | undefined> =>
-  (await q<Profile>("SELECT * FROM sender_profiles WHERE active LIMIT 1"))[0];
+const activeProfile = async (): Promise<(Profile & SmsProfile) | undefined> =>
+  (await q<Profile & SmsProfile>("SELECT * FROM sender_profiles WHERE active LIMIT 1"))[0];
 
 const ctxFor = (lead: any, p: Profile): DraftContext => ({
   businessName: lead.name, category: lead.category, city: lead.city,
@@ -42,9 +43,9 @@ export async function queueFollowups() {
   if (!p) return;
   const rows = await q(
     `SELECT l.*, d.step, d.sent_at FROM leads l
-     JOIN LATERAL (SELECT step, sent_at FROM drafts WHERE lead_id=l.id AND status='sent' ORDER BY step DESC LIMIT 1) d ON TRUE
+     JOIN LATERAL (SELECT step, sent_at FROM drafts WHERE lead_id=l.id AND status='sent' AND channel='email' ORDER BY step DESC LIMIT 1) d ON TRUE
      WHERE l.status='contacted' AND d.step < 2
-       AND NOT EXISTS (SELECT 1 FROM drafts x WHERE x.lead_id=l.id AND x.step=d.step+1)`,
+       AND NOT EXISTS (SELECT 1 FROM drafts x WHERE x.lead_id=l.id AND x.channel='email' AND x.step=d.step+1)`,
   );
   for (const l of rows) {
     const due = new Date(l.sent_at).getTime() + FOLLOWUP_DELAYS_DAYS[l.step] * 86400000;
@@ -66,12 +67,12 @@ export async function sendNext(): Promise<boolean> {
   if (!p) return false;
   const h = hourIn(p.timezone);
   if (h < p.send_start_hour || h >= p.send_end_hour) return false;
-  const [{ n }] = await q("SELECT count(*)::int AS n FROM drafts WHERE status='sent' AND profile_id=$1 AND sent_at > now() - interval '24 hours'", [p.id]);
+  const [{ n }] = await q("SELECT count(*)::int AS n FROM drafts WHERE status='sent' AND channel='email' AND profile_id=$1 AND sent_at > now() - interval '24 hours'", [p.id]);
   if (n >= p.daily_cap) return false;
 
   const [d] = await q(
     `SELECT d.*, l.email, l.status AS lead_status FROM drafts d JOIN leads l ON l.id=d.lead_id
-     WHERE d.status='approved' AND d.profile_id=$1 AND (d.send_after IS NULL OR d.send_after<=now())
+     WHERE d.status='approved' AND d.channel='email' AND d.profile_id=$1 AND (d.send_after IS NULL OR d.send_after<=now())
      ORDER BY d.step, d.id LIMIT 1`, [p.id]);
   if (!d) return false;
 
@@ -116,6 +117,50 @@ export async function sendNext(): Promise<boolean> {
   return true;
 }
 
+// Sends one approved text if inside TCPA hours (8am-9pm) and the sender's window, under the SMS cap,
+// and only to a lead with recorded consent whose number is not on the do-not-text list.
+export async function sendNextSms(): Promise<boolean> {
+  const p = await activeProfile();
+  if (!p) return false;
+  const profileError = smsProfileError(p);
+  if (profileError) return false;
+  const [start, end] = smsWindow(p.send_start_hour, p.send_end_hour);
+  const h = hourIn(p.timezone);
+  if (h < start || h >= end) return false;
+  const [{ n }] = await q("SELECT count(*)::int AS n FROM drafts WHERE status='sent' AND channel='sms' AND profile_id=$1 AND sent_at > now() - interval '24 hours'", [p.id]);
+  if (n >= p.sms_daily_cap) return false;
+
+  const [d] = await q(
+    `SELECT d.id, l.sms_phone FROM drafts d JOIN leads l ON l.id=d.lead_id
+     WHERE d.status='approved' AND d.channel='sms' AND d.profile_id=$1 AND (d.send_after IS NULL OR d.send_after<=now())
+     ORDER BY d.id LIMIT 1`, [p.id]);
+  if (!d) return false;
+  const phone = normalizePhone(d.sms_phone);
+  if (!phone) {
+    await q("UPDATE drafts SET status='rejected', error='no valid consented phone number' WHERE id=$1 AND status='approved'", [d.id]);
+    return true;
+  }
+  await withPhoneLock(phone, async (client) => {
+    const [current] = (await client.query(
+      `SELECT d.*, l.sms_phone, l.sms_consent_at, l.status AS lead_status FROM drafts d JOIN leads l ON l.id=d.lead_id
+       WHERE d.id=$1 AND d.status='approved' AND d.channel='sms' FOR UPDATE OF d, l`, [d.id])).rows;
+    if (!current || current.sms_phone !== phone) return;
+    const suppressed = (await client.query("SELECT 1 FROM sms_suppression WHERE phone=$1", [phone])).rowCount;
+    if (suppressed || !current.sms_consent_at || current.lead_status === "unsubscribed") {
+      await client.query("UPDATE drafts SET status='rejected', error='no SMS consent or number opted out' WHERE id=$1", [d.id]);
+      return;
+    }
+    try {
+      const sid = await twilioSend(p, phone, composeCommercialSms(p, current.body));
+      await client.query("UPDATE drafts SET status='sent', sent_at=now(), message_id=$2 WHERE id=$1", [d.id, sid]);
+      await client.query("INSERT INTO events(lead_id,type,detail) VALUES($1,'sms_sent',$2)", [current.lead_id, JSON.stringify({ sid })]);
+    } catch (e: any) {
+      await client.query("UPDATE drafts SET status='failed', error=$2 WHERE id=$1", [d.id, String(e.message).slice(0, 500)]);
+    }
+  });
+  return true;
+}
+
 const classify = (subject: string, text: string, from: string): "bounce" | "unsubscribe" | "reply" => {
   if (/mailer-daemon|postmaster/i.test(from) || /undeliverable|delivery status|returned mail/i.test(subject)) return "bounce";
   if (/\b(unsubscribe|remove me|stop (emailing|contacting)|do not contact|not interested)\b/i.test(text.slice(0, 600))) return "unsubscribe";
@@ -141,7 +186,7 @@ export async function pollReplies() {
       if (kind === "bounce" || kind === "unsubscribe") {
         await suppressEmail(row.email, kind);
       } else await q("UPDATE leads SET status='replied' WHERE id=$1", [lead.id]);
-      await q("UPDATE drafts SET status='rejected', error='lead responded' WHERE lead_id=$1 AND status IN ('pending','approved')", [lead.id]);
+      await q("UPDATE drafts SET status='rejected', error='lead responded' WHERE lead_id=$1 AND channel='email' AND status IN ('pending','approved')", [lead.id]);
       await q("INSERT INTO events(lead_id,type,detail) VALUES($1,$2,$3)", [lead.id, kind, JSON.stringify({ subject: m.envelope?.subject })]);
       await c.messageFlagsAdd(m.uid, ["\\Seen"], { uid: true });
     }
@@ -154,6 +199,9 @@ export function startWorkers() {
   // Send spacing: one email per tick, randomized 2-6 minutes apart
   const sendLoop = async () => { await safe("send", sendNext); setTimeout(sendLoop, 120000 + Math.random() * 240000); };
   setTimeout(sendLoop, 30000);
+  // Text spacing: one SMS per tick, randomized 1-3 minutes apart
+  const smsLoop = async () => { await safe("sms", sendNextSms); setTimeout(smsLoop, 60000 + Math.random() * 120000); };
+  setTimeout(smsLoop, 45000);
   setInterval(() => safe("leads", async () => { await processNewLeads(); await draftQualified(); await queueFollowups(); }), 5 * 60000);
   setInterval(() => safe("replies", pollReplies), 10 * 60000);
 }
